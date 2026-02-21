@@ -1,83 +1,87 @@
 import express from "express";
 import sharp from "sharp";
-import axios from "axios";
 
 const app = express();
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "50mb" }));
 
 app.post("/overlay", async (req, res) => {
   try {
     const {
-      imageUrl,
-      logoUrl,
+      imageBase64,
+      logoBase64,
       position = "top-right",
       padding = 40,
-      logoWidth = 0.15, // Default = 15% of image width
-      x = null,
-      y = null,
+      logoWidth = 0.2,      // 20% of base image width OR px if > 1
       addShadow = false
     } = req.body;
 
-    if (!imageUrl || !logoUrl) {
-      return res.status(400).json({ error: "imageUrl and logoUrl required" });
+    if (!imageBase64 || !logoBase64) {
+      return res.status(400).json({
+        error: "imageBase64 and logoBase64 are required"
+      });
     }
 
-    // Download base image
-    const imageResponse = await axios.get(imageUrl, {
-      responseType: "arraybuffer"
-    });
+    // Remove data:image/png;base64, if present
+    const cleanBase64 = (str) =>
+      str.replace(/^data:image\/\w+;base64,/, "");
 
-    // Download logo
-    const logoResponse = await axios.get(logoUrl, {
-      responseType: "arraybuffer"
-    });
+    const baseImageBuffer = Buffer.from(cleanBase64(imageBase64), "base64");
+    const logoBufferRaw = Buffer.from(cleanBase64(logoBase64), "base64");
 
-    const baseImageBuffer = Buffer.from(imageResponse.data);
+    // Get base image metadata
     const baseImage = sharp(baseImageBuffer);
     const metadata = await baseImage.metadata();
 
     if (!metadata.width || !metadata.height) {
-      throw new Error("Could not determine base image dimensions");
+      throw new Error("Invalid base image");
     }
 
-    // Calculate dynamic logo width
-    let finalLogoWidth;
+    const baseWidth = metadata.width;
+
+    // Determine logo width
+    let calculatedLogoWidth;
+
     if (logoWidth <= 1) {
-      // Treat as percentage
-      finalLogoWidth = Math.round(metadata.width * logoWidth);
+      // Percentage mode
+      calculatedLogoWidth = Math.floor(baseWidth * logoWidth);
     } else {
-      // Treat as fixed pixel size
-      finalLogoWidth = logoWidth;
+      // Pixel mode
+      calculatedLogoWidth = logoWidth;
     }
 
-    let logoSharp = sharp(Buffer.from(logoResponse.data))
-      .resize({ width: finalLogoWidth })
+    // Resize logo
+    let processedLogo = sharp(logoBufferRaw)
+      .resize({ width: calculatedLogoWidth })
       .png();
 
-    // Optional shadow
+    // Add shadow if enabled
     if (addShadow) {
-      const shadow = await logoSharp
-        .clone()
-        .flatten({ background: "#000000" })
-        .blur(10)
+      const shadow = await sharp(logoBufferRaw)
+        .resize({ width: calculatedLogoWidth })
+        .blur(8)
+        .modulate({ brightness: 0.3 })
+        .png()
         .toBuffer();
 
-      const logoBuffer = await logoSharp.toBuffer();
-
-      logoSharp = sharp({
+      const logoWithShadow = await sharp({
         create: {
-          width: finalLogoWidth + 20,
-          height: finalLogoWidth + 20,
+          width: calculatedLogoWidth,
+          height: calculatedLogoWidth,
           channels: 4,
           background: { r: 0, g: 0, b: 0, alpha: 0 }
         }
-      }).composite([
-        { input: shadow, top: 10, left: 10, opacity: 0.4 },
-        { input: logoBuffer, top: 0, left: 0 }
-      ]);
+      })
+        .composite([
+          { input: shadow, top: 10, left: 10 },
+          { input: await processedLogo.toBuffer(), top: 0, left: 0 }
+        ])
+        .png()
+        .toBuffer();
+
+      processedLogo = sharp(logoWithShadow);
     }
 
-    const logoBufferFinal = await logoSharp.toBuffer();
+    const finalLogoBuffer = await processedLogo.toBuffer();
 
     // Position mapping
     const gravityMap = {
@@ -88,40 +92,28 @@ app.post("/overlay", async (req, res) => {
       "center": "center"
     };
 
-    let compositeOptions;
+    const compositeOptions = {
+      input: finalLogoBuffer,
+      gravity: gravityMap[position] || "northeast"
+    };
 
-    // Custom pixel placement
-    if (x !== null && y !== null) {
-      compositeOptions = {
-        input: logoBufferFinal,
-        top: y,
-        left: x
-      };
-    } else {
-      compositeOptions = {
-        input: logoBufferFinal,
-        gravity: gravityMap[position] || "northeast",
-        top: padding,
-        left: padding
-      };
-    }
-
-    const finalImage = await baseImage
+    // Apply overlay
+    const finalImage = await sharp(baseImageBuffer)
       .composite([compositeOptions])
-      .png({ compressionLevel: 9 })
+      .png()
       .toBuffer();
 
     res.set("Content-Type", "image/png");
     res.send(finalImage);
 
   } catch (error) {
-    console.error("Overlay error:", error);
+    console.error("Overlay Error:", error);
     res.status(500).json({ error: error.message });
   }
 });
 
 app.get("/", (req, res) => {
-  res.send("Image Overlay Service Running 🚀");
+  res.json({ status: "Image Overlay Service Running 🚀" });
 });
 
 app.listen(3000, () => {
