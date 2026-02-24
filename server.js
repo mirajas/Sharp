@@ -87,7 +87,6 @@ app.post("/overlay", async (req, res) => {
 
     res.set("Content-Type", "image/png");
     res.send(finalImage);
-    console.log("Node version:", process.version);
   } catch (error) {
     console.error("Overlay Error:", error);
     res.status(500).json({ error: error.message });
