@@ -130,51 +130,69 @@ app.post("/overlay", async (req, res) => {
     const baseImageBuffer = await fetchImageSecure(imageUrl);
     const logoBufferRaw = await fetchImageSecure(logoUrl);
 
-    const baseImage = sharp(baseImageBuffer);
-    const metadata = await baseImage.metadata();
+    /* -------------------- BASE IMAGE -------------------- */
 
-    if (!metadata.width || !metadata.height) {
+    const baseImage = sharp(baseImageBuffer, { failOnError: false });
+    const baseMetadata = await baseImage.metadata();
+
+    if (!baseMetadata.width || !baseMetadata.height) {
       throw new Error("Invalid base image");
     }
 
-    const baseWidth = metadata.width;
+    const baseWidth = baseMetadata.width;
+
+    /* -------------------- LOGO PROCESSING -------------------- */
+
+    const logoImage = sharp(logoBufferRaw, { failOnError: false });
+    const logoMetadata = await logoImage.metadata();
+
+    if (!logoMetadata.width || !logoMetadata.height) {
+      throw new Error("Invalid logo image");
+    }
 
     const calculatedLogoWidth =
       logoWidth <= 1
-        ? Math.floor(baseWidth * logoWidth)
-        : parseInt(logoWidth);
+        ? Math.max(50, Math.floor(baseWidth * logoWidth)) // minimum 50px
+        : Math.max(50, parseInt(logoWidth));
 
-    let processedLogo = sharp(logoBufferRaw)
-      .resize({ width: calculatedLogoWidth })
-      .png();
+    // Resize while preserving aspect ratio
+    let resizedLogoBuffer = await logoImage
+      .resize({
+        width: calculatedLogoWidth,
+        fit: "contain",
+        withoutEnlargement: false,
+      })
+      .ensureAlpha() // ensures proper compositing for JPG
+      .png()
+      .toBuffer();
+
+    /* -------------------- SHADOW (OPTIONAL) -------------------- */
 
     if (addShadow) {
-      const shadow = await sharp(logoBufferRaw)
-        .resize({ width: calculatedLogoWidth })
-        .blur(8)
-        .modulate({ brightness: 0.3 })
-        .png()
+      const shadow = await sharp(resizedLogoBuffer)
+        .blur(10)
+        .modulate({ brightness: 0.2 })
         .toBuffer();
 
-      const logoWithShadow = await sharp({
+      const shadowedLogo = await sharp({
         create: {
-          width: calculatedLogoWidth,
-          height: calculatedLogoWidth,
+          width: calculatedLogoWidth + 20,
+          height: calculatedLogoWidth + 20,
           channels: 4,
           background: { r: 0, g: 0, b: 0, alpha: 0 },
         },
       })
         .composite([
           { input: shadow, top: 10, left: 10 },
-          { input: await processedLogo.toBuffer(), top: 0, left: 0 },
+          { input: resizedLogoBuffer, top: 0, left: 0 },
         ])
         .png()
         .toBuffer();
 
-      processedLogo = sharp(logoWithShadow);
+      resizedLogoBuffer = shadowedLogo;
     }
 
-    const finalLogoBuffer = await processedLogo.toBuffer();
+    /* -------------------- POSITIONING -------------------- */
 
     const gravityMap = {
       "top-right": "northeast",
@@ -187,7 +205,7 @@ app.post("/overlay", async (req, res) => {
     const finalImage = await sharp(baseImageBuffer)
       .composite([
         {
-          input: finalLogoBuffer,
+          input: resizedLogoBuffer,
           gravity: gravityMap[position] || "northeast",
         },
       ])
