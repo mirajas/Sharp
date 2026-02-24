@@ -2,33 +2,28 @@ import express from "express";
 import sharp from "sharp";
 
 const app = express();
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "5mb" })); // No more huge base64
 
 app.post("/overlay", async (req, res) => {
   try {
     const {
-      imageBase64,
-      logoBase64,
+      imageUrl,
+      logoUrl,
       position = "top-right",
-      padding = 40,
-      logoWidth = 0.2,      // 20% of base image width OR px if > 1
+      logoWidth = 0.2,
       addShadow = false
     } = req.body;
 
-    if (!imageBase64 || !logoBase64) {
+    if (!imageUrl || !logoUrl) {
       return res.status(400).json({
-        error: "imageBase64 and logoBase64 are required"
+        error: "imageUrl and logoUrl are required"
       });
     }
 
-    // Remove data:image/png;base64, if present
-    const cleanBase64 = (str) =>
-      str.replace(/^data:image\/\w+;base64,/, "");
+    // Fetch images directly
+    const baseImageBuffer = await fetch(imageUrl).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
+    const logoBufferRaw = await fetch(logoUrl).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
 
-    const baseImageBuffer = Buffer.from(cleanBase64(imageBase64), "base64");
-    const logoBufferRaw = Buffer.from(cleanBase64(logoBase64), "base64");
-
-    // Get base image metadata
     const baseImage = sharp(baseImageBuffer);
     const metadata = await baseImage.metadata();
 
@@ -38,23 +33,14 @@ app.post("/overlay", async (req, res) => {
 
     const baseWidth = metadata.width;
 
-    // Determine logo width
-    let calculatedLogoWidth;
+    let calculatedLogoWidth = logoWidth <= 1
+      ? Math.floor(baseWidth * logoWidth)
+      : logoWidth;
 
-    if (logoWidth <= 1) {
-      // Percentage mode
-      calculatedLogoWidth = Math.floor(baseWidth * logoWidth);
-    } else {
-      // Pixel mode
-      calculatedLogoWidth = logoWidth;
-    }
-
-    // Resize logo
     let processedLogo = sharp(logoBufferRaw)
       .resize({ width: calculatedLogoWidth })
       .png();
 
-    // Add shadow if enabled
     if (addShadow) {
       const shadow = await sharp(logoBufferRaw)
         .resize({ width: calculatedLogoWidth })
@@ -83,7 +69,6 @@ app.post("/overlay", async (req, res) => {
 
     const finalLogoBuffer = await processedLogo.toBuffer();
 
-    // Position mapping
     const gravityMap = {
       "top-right": "northeast",
       "top-left": "northwest",
@@ -92,28 +77,21 @@ app.post("/overlay", async (req, res) => {
       "center": "center"
     };
 
-    const compositeOptions = {
-      input: finalLogoBuffer,
-      gravity: gravityMap[position] || "northeast"
-    };
-
-    // Apply overlay
     const finalImage = await sharp(baseImageBuffer)
-      .composite([compositeOptions])
+      .composite([{
+        input: finalLogoBuffer,
+        gravity: gravityMap[position] || "northeast"
+      }])
       .png()
       .toBuffer();
 
     res.set("Content-Type", "image/png");
     res.send(finalImage);
-
+    console.log("Node version:", process.version);
   } catch (error) {
     console.error("Overlay Error:", error);
     res.status(500).json({ error: error.message });
   }
-});
-
-app.get("/", (req, res) => {
-  res.json({ status: "Image Overlay Service Running 🚀" });
 });
 
 app.listen(3000, () => {
