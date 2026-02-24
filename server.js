@@ -1,8 +1,112 @@
 import express from "express";
 import sharp from "sharp";
+import dns from "dns/promises";
+import net from "net";
+import rateLimit from "express-rate-limit";
 
 const app = express();
-app.use(express.json({ limit: "5mb" })); // No more huge base64
+app.use(express.json({ limit: "1mb" }));
+
+/* -------------------- CONFIG -------------------- */
+
+const ALLOWED_HOSTS = [
+  "bkend-minio.circleinc.in",
+  "circleinc.in",
+];
+
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+const FETCH_TIMEOUT_MS = 5000;
+
+/* -------------------- RATE LIMIT -------------------- */
+
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60, // 60 req per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use(limiter);
+
+/* -------------------- SECURITY HELPERS -------------------- */
+
+function isPrivateIP(ip) {
+  if (!net.isIP(ip)) return true;
+
+  if (ip.startsWith("10.")) return true;
+  if (ip.startsWith("127.")) return true;
+  if (ip.startsWith("192.168.")) return true;
+  if (ip.startsWith("169.254.")) return true;
+
+  if (ip.startsWith("172.")) {
+    const second = parseInt(ip.split(".")[1], 10);
+    if (second >= 16 && second <= 31) return true;
+  }
+
+  return false;
+}
+
+async function validateUrlSecurity(rawUrl) {
+  let parsed;
+
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL format");
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new Error("Only HTTPS URLs are allowed");
+  }
+
+  if (!ALLOWED_HOSTS.includes(parsed.hostname)) {
+    throw new Error("Domain not allowed");
+  }
+
+  // Resolve DNS and block private IPs
+  const addresses = await dns.lookup(parsed.hostname, { all: true });
+
+  for (const addr of addresses) {
+    if (isPrivateIP(addr.address)) {
+      throw new Error("Access to private IP ranges is not allowed");
+    }
+  }
+
+  return parsed;
+}
+
+async function fetchImageSecure(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  const response = await fetch(url, { signal: controller.signal });
+
+  clearTimeout(timeout);
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch image");
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (!contentType || !contentType.startsWith("image/")) {
+    throw new Error("URL does not point to a valid image");
+  }
+
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && parseInt(contentLength) > MAX_IMAGE_SIZE) {
+    throw new Error("Image exceeds 10MB limit");
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+
+  if (arrayBuffer.byteLength > MAX_IMAGE_SIZE) {
+    throw new Error("Image exceeds 10MB limit");
+  }
+
+  return Buffer.from(arrayBuffer);
+}
+
+/* -------------------- OVERLAY ROUTE -------------------- */
 
 app.post("/overlay", async (req, res) => {
   try {
@@ -11,18 +115,20 @@ app.post("/overlay", async (req, res) => {
       logoUrl,
       position = "top-right",
       logoWidth = 0.2,
-      addShadow = false
+      addShadow = false,
     } = req.body;
 
     if (!imageUrl || !logoUrl) {
       return res.status(400).json({
-        error: "imageUrl and logoUrl are required"
+        error: "imageUrl and logoUrl are required",
       });
     }
 
-    // Fetch images directly
-    const baseImageBuffer = await fetch(imageUrl).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
-    const logoBufferRaw = await fetch(logoUrl).then(r => r.arrayBuffer()).then(b => Buffer.from(b));
+    await validateUrlSecurity(imageUrl);
+    await validateUrlSecurity(logoUrl);
+
+    const baseImageBuffer = await fetchImageSecure(imageUrl);
+    const logoBufferRaw = await fetchImageSecure(logoUrl);
 
     const baseImage = sharp(baseImageBuffer);
     const metadata = await baseImage.metadata();
@@ -33,9 +139,10 @@ app.post("/overlay", async (req, res) => {
 
     const baseWidth = metadata.width;
 
-    let calculatedLogoWidth = logoWidth <= 1
-      ? Math.floor(baseWidth * logoWidth)
-      : logoWidth;
+    const calculatedLogoWidth =
+      logoWidth <= 1
+        ? Math.floor(baseWidth * logoWidth)
+        : parseInt(logoWidth);
 
     let processedLogo = sharp(logoBufferRaw)
       .resize({ width: calculatedLogoWidth })
@@ -54,12 +161,12 @@ app.post("/overlay", async (req, res) => {
           width: calculatedLogoWidth,
           height: calculatedLogoWidth,
           channels: 4,
-          background: { r: 0, g: 0, b: 0, alpha: 0 }
-        }
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        },
       })
         .composite([
           { input: shadow, top: 10, left: 10 },
-          { input: await processedLogo.toBuffer(), top: 0, left: 0 }
+          { input: await processedLogo.toBuffer(), top: 0, left: 0 },
         ])
         .png()
         .toBuffer();
@@ -74,25 +181,41 @@ app.post("/overlay", async (req, res) => {
       "top-left": "northwest",
       "bottom-right": "southeast",
       "bottom-left": "southwest",
-      "center": "center"
+      center: "center",
     };
 
     const finalImage = await sharp(baseImageBuffer)
-      .composite([{
-        input: finalLogoBuffer,
-        gravity: gravityMap[position] || "northeast"
-      }])
+      .composite([
+        {
+          input: finalLogoBuffer,
+          gravity: gravityMap[position] || "northeast",
+        },
+      ])
       .png()
       .toBuffer();
 
     res.set("Content-Type", "image/png");
     res.send(finalImage);
+
   } catch (error) {
-    console.error("Overlay Error:", error);
-    res.status(500).json({ error: error.message });
+    console.error("Overlay Error:", error.message);
+
+    res.status(500).json({
+      error: "Image processing failed",
+    });
   }
 });
 
-app.listen(3000, () => {
-  console.log("Image overlay service running on port 3000");
+/* -------------------- HEALTH CHECK -------------------- */
+
+app.get("/", (req, res) => {
+  res.json({ status: "Image Overlay Service Running" });
+});
+
+/* -------------------- START SERVER -------------------- */
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Image overlay service running on port ${PORT}`);
 });
