@@ -116,6 +116,9 @@ app.post("/overlay", async (req, res) => {
       position = "top-right",
       logoWidth = 0.2,
       addShadow = false,
+      shadowBlur,
+      shadowOffset,
+      shadowOpacity
     } = req.body;
 
     if (!imageUrl || !logoUrl) {
@@ -166,22 +169,43 @@ app.post("/overlay", async (req, res) => {
       .png()
       .toBuffer();
 
+    let finalShadowBlur = 10;
+    let finalShadowOffset = 10;
+    let finalShadowOpacity = 0.3;
+
+    if (addShadow) {
+      finalShadowBlur = Number.isFinite(+shadowBlur) && +shadowBlur >= 0
+        ? +shadowBlur
+        : 10;
+    
+      finalShadowOffset = Number.isFinite(+shadowOffset) && +shadowOffset >= 0
+        ? +shadowOffset
+        : 10;
+    
+      finalShadowOpacity = Number.isFinite(+shadowOpacity) &&
+                           +shadowOpacity >= 0 &&
+                           +shadowOpacity <= 1
+        ? +shadowOpacity
+        : 0.3;
+    }
+
     /* -------------------- SHADOW (OPTIONAL) -------------------- */
 
     if (addShadow) {
+
       const resizedLogo = await sharp(resizedLogoBuffer)
         .ensureAlpha()
         .toBuffer();
     
       const shadow = await sharp(resizedLogo)
-        .blur(Math.max(0, parseInt(shadowBlur)))
-        .modulate({ brightness: 1 - shadowOpacity })
+        .blur(finalShadowBlur)
+        .modulate({ brightness: 1 - finalShadowOpacity })
         .toBuffer();
     
       const shadowCanvas = await sharp({
         create: {
-          width: calculatedLogoWidth + shadowOffset,
-          height: calculatedLogoWidth + shadowOffset,
+          width: calculatedLogoWidth + finalShadowOffset,
+          height: calculatedLogoWidth + finalShadowOffset,
           channels: 4,
           background: { r: 0, g: 0, b: 0, alpha: 0 }
         }
@@ -189,8 +213,8 @@ app.post("/overlay", async (req, res) => {
         .composite([
           {
             input: shadow,
-            top: shadowOffset,
-            left: shadowOffset
+            top: finalShadowOffset,
+            left: finalShadowOffset
           },
           {
             input: resizedLogo,
@@ -203,7 +227,6 @@ app.post("/overlay", async (req, res) => {
     
       resizedLogoBuffer = shadowCanvas;
     }
-
     /* -------------------- POSITIONING -------------------- */
 
     const gravityMap = {
