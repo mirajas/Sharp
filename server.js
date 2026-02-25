@@ -169,27 +169,39 @@ app.post("/overlay", async (req, res) => {
     /* -------------------- SHADOW (OPTIONAL) -------------------- */
 
     if (addShadow) {
-      const shadow = await sharp(resizedLogoBuffer)
-        .blur(10)
-        .modulate({ brightness: 0.2 })
+      const resizedLogo = await sharp(resizedLogoBuffer)
+        .ensureAlpha()
         .toBuffer();
-
-      const shadowedLogo = await sharp({
+    
+      const shadow = await sharp(resizedLogo)
+        .blur(Math.max(0, parseInt(shadowBlur)))
+        .modulate({ brightness: 1 - shadowOpacity })
+        .toBuffer();
+    
+      const shadowCanvas = await sharp({
         create: {
-          width: calculatedLogoWidth + 20,
-          height: calculatedLogoWidth + 20,
+          width: calculatedLogoWidth + shadowOffset,
+          height: calculatedLogoWidth + shadowOffset,
           channels: 4,
-          background: { r: 0, g: 0, b: 0, alpha: 0 },
-        },
+          background: { r: 0, g: 0, b: 0, alpha: 0 }
+        }
       })
         .composite([
-          { input: shadow, top: 10, left: 10 },
-          { input: resizedLogoBuffer, top: 0, left: 0 },
+          {
+            input: shadow,
+            top: shadowOffset,
+            left: shadowOffset
+          },
+          {
+            input: resizedLogo,
+            top: 0,
+            left: 0
+          }
         ])
         .png()
         .toBuffer();
-
-      resizedLogoBuffer = shadowedLogo;
+    
+      resizedLogoBuffer = shadowCanvas;
     }
 
     /* -------------------- POSITIONING -------------------- */
